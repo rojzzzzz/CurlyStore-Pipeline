@@ -86,15 +86,25 @@ STORES = [
 ]
 
 def _producer_sale() -> dict:
+    store = random.choice(STORES)
+    product = random.choice(PRODUCTS)
 
     order = {
         "order_id": str(uuid.uuid4()),
-        "store": random.choice(STORES),
-        "product": random.choice(PRODUCTS),
+        "store_id": store["id"],
+        "store_name": store["name"],
+        "store_city": store["city"],
+        "store_country": store["country"],
+        "store_currency": store["currency"],
+        "product_id": product["id"],
+        "product_name": product["name"],
+        "product_category": product["category"],
+        "product_price": product["price"],
+        "product_stock": product["stock"],
         "quantity": random.randint(1, 5),
         "status": "completed"
     }
-    order['total_price'] = round(order['product']['price'] * order['quantity'], 2)
+    order['total_price'] = round(order['product_price'] * order['quantity'], 2)
     order['order_date'] = f"2026-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
     return order
 

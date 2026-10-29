@@ -36,7 +36,7 @@ def get_orders() -> list:
             response = _request_api("http://localhost:8000/", session)
 
             if response:
-                producer.send(RAW_TOPIC, value=response)
+                producer.send(RAW_TOPIC, value=response, key={"order_id": response.get("order_id")})
                 time.sleep(2)
                 n -= 1
 
@@ -45,14 +45,3 @@ def get_orders() -> list:
 
     producer.flush()
     
-def test():
-    with requests.Session() as session:
-        response = _request_api("http://127.0.0.1:8000/", session)
-        if response:
-            print("Test successful. Received response:")
-            print(response)
-        else:
-            print("Test failed. No response received from the event generator API.")
-
-
-test()
