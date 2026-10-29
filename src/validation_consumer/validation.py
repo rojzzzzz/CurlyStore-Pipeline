@@ -45,14 +45,17 @@ for message in consumer:
         producer.send(PROCESSED_TOPIC, value=message, key=message.key)
 
     else:
-        enriched_message = {
+        metadata = {
             "source_topic": RAW_TOPIC,
             "source_partition": message.partition,
             "source_offset": message.offset,
-            "original_message": message.value,
-            "diagnosis": diagnosis,
             "failed_at": datetime.now().isoformat()
         }
+
+        enriched_message = {
+            "failure_metedata": metadata,
+            "original_message": message.value}
+
         
         logger.error(f"Message with key: {message.key} has failed validation and been sent to the DLQ.")
         producer.send(DLQ_TOPIC, value=enriched_message, key=message.key)

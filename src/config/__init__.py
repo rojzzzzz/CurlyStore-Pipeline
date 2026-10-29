@@ -1,4 +1,5 @@
 from pathlib import Path
+import smtplib
 import logging
 import yaml
 import os
@@ -32,3 +33,9 @@ DLQ_TOPIC = "dlq-orders"
 
 CONTRACT_PATH = Path(__file__).parent / "data_contract.yml"
 CONTRACT = read_contract(CONTRACT_PATH)
+
+SENDER_EMAIL = _get_env("SENDER_EMAIL")
+RECEIVER_EMAIL = _get_env("RECEIVER_EMAIL")
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 465
+SMTP_PASSWORD = _get_env("SMTP_PASSWORD")
