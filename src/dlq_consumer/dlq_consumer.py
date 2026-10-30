@@ -1,114 +1,184 @@
-from src.config import CONTRACT, DQL_TOPIC, BOOTSTRAP_SERVERS, RAW_TOPIC, SENDER_EMAIL, RECEIVER_EMAIL, SMTP_HOST, SMTP_PORT, SMTP_PASSWORD
-from src.SchemaDiagnoser.fn import check_schema
-from kafka import KafkaConsumer, KafkaProducer
+from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
-import smtplib
-import logging
 import json
+import logging
+import math
+import re
+import smtplib
+
+from kafka import KafkaConsumer, KafkaProducer, TopicPartition
+from kafka.structs import OffsetAndMetadata
+from src.config import (
+    CONTRACT, DLQ_TOPIC, BOOTSTRAP_SERVERS, RAW_TOPIC, SENDER_EMAIL,
+    RECEIVER_EMAIL, SMTP_HOST, SMTP_PORT, SMTP_PASSWORD,
+    PARKING_LOT_TOPIC, RECOVERY_ATTEMPTS_THRESHOLD,
+)
+from src.SchemaDiagnoser.fn import check_schema
 
 logger = logging.getLogger(__name__)
-consumer = KafkaConsumer(
-    DQL_TOPIC,
-    bootstrap_servers=BOOTSTRAP_SERVERS,
-    value_deserializer=lambda m: json.loads(m),
-    key_deserializer=lambda k: json.loads(k) if k else None,
-    auto_offset_reset="earliest",
-    enable_auto_commit=False,
-    group_id="dlq-consumer-group"
-)
+ATTEMPTS_HEADER = "recovery_attempts"
 
 
-def _resend_to_raw_topic(message: dict):
-    """Resends the message to the RAW_TOPIC after temporal adaptation and validation"""
+def _temporal_adaptation(message: dict, diagnosis: dict) -> dict | None:
+    """Repair only mechanically verifiable drift supported by a complete AI review."""
 
-    producer = KafkaProducer(
-    bootstrap_servers=BOOTSTRAP_SERVERS,
-    value_serializer=lambda m: json.dumps(m),
-    key_serializer=lambda k: json.dumps(k) if k else None,
-    acks="all",
-    enable_idempotence=True,
-    retries=5
-    )
-
-    diagnosis = check_schema(schema_contract=CONTRACT, incoming=[message])
-
-    if diagnosis['valid']:
-        producer.send(RAW_TOPIC, value=message.value, key=message.key)
-        logger.info(f"Message with key: {message.key} has been successfully adapted and resent to the RAW_TOPIC.")
-    else:
-        logger.error(f"Message with key: {message.key} failed validation after adaptation and will not be resent.")
-
-
-def _temporal_adaptation(message: dict, diagnosis: dict) -> dict:
-    #TODO: Check
- 
-    adapted = message.copy()
-    review = diagnosis['review']
-    explanation = diagnosis.get("explanation", {})
+    review = diagnosis.get("review", {})
+    explanation = review.get("diagnosis") or {}
     category = explanation.get("category")
 
-    if (review['status'] != "completed" or review.get("coverage") or 
-        category not in ['schema_expansion', 'naming_change', 'mixed_changes']
-        or not explanation.get("probability", 0) > 0.9):
-
+    if (review.get("status") != "completed" or review.get("coverage")
+            or explanation.get("probability", 0) < 0.9
+            or category not in {"schema_expansion", "naming_change",
+                                "representation_change", "mixed_changes"}):
         return None
 
-    added = [c['column'] for c in diagnosis['changes'] if c['issues'] == 'added']
-    original = set(message.keys()) - set(added)
+    adapted = message.copy()
+    changes = diagnosis["changes"]
+    added = {c["column"] for c in changes if c["issues"] == ["added"]}
+    missing = {c["column"] for c in changes if c["issues"] == ["missing"]}
+    normalize = lambda name: name.replace("_", "").casefold()
 
-    for column in added:
-        if category == "schema_expansion":
-            adapted.pop(column)
+    for column in sorted(added):
+        #Explain
+        matches = [name for name in (message.keys() - added) | missing
+                   if normalize(name) == normalize(column)]
+        
+        if len(matches) == 1 and category in {"naming_change", "mixed_changes"}:
+            target = matches[0]
+            
+            #Explain
+            if sum(normalize(name) == normalize(column) for name in added) != 1:
+                return None
+            if target in adapted:
+                value, existing = adapted[column], adapted[target]
+                if (type(value) not in (str, int, float, bool, type(None))
+                        or type(value) is not type(existing) or value != existing):
+                    return None
+            else:
+                # Require AI to corroborate this exact missing/added pair.
+                pair = [next(i for i, c in enumerate(changes) if c["column"] == name)
+                        for name in (target, column)]
+                if not any(r.get("category") == "possible_rename"
+                           and r.get("change_indices") == pair
+                           and r.get("probability", 0) >= 0.9
+                           and not r.get("competing_changes")
+                           for r in review.get("renames", [])):
+                    return None
+                adapted[target] = adapted[column]
+            del adapted[column]
+        elif category == "schema_expansion":
+            del adapted[column]
+        else:
+            return None
+
+    for change in changes:
+        if change["issues"] != ["type_changed"]:
             continue
+        if category not in {"representation_change", "mixed_changes"}:
+            return None
+        column, expected = change["column"], change["expected"]
+        value = adapted[column]
+        try:
+            if expected == "int" and type(value) is str and re.fullmatch(r"-?(0|[1-9][0-9]*)", value):
+                adapted[column] = int(value)
+            elif expected == "float" and (type(value) is int or
+                    (type(value) is str and re.fullmatch(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?", value))):
+                number = float(value)
+                if not math.isfinite(number) or Decimal(str(number)) != Decimal(value):
+                    return None
+                adapted[column] = number
+            else:
+                return None
+        except (ValueError, OverflowError, InvalidOperation):
+            return None
+    return adapted if added or any(c["issues"] == ["type_changed"] for c in changes) else None
 
-        matches = [name for name in original
-                   if name.replace("_", "").casefold() == column.replace("_", "").casefold()]
-
-        if len(matches) == 1:
-            value, original_value = adapted.get(column), adapted[matches[0]]
-            if ((value is None or isinstance(value, (str, int, float, bool)))
-                    and type(value) is type(original_value) and value == original_value):
-                adapted.pop(column)
-    return adapted
-    
-
-def _diagnose_failed_event(message: dict):
-
-    return check_schema(schema_contract=CONTRACT, incoming=[message.value],
-                    ai_review=True, context="Failed order from a store of products of curly hair")
 
 def _send_alert(body: str):
     try:
-        with smtplib.SMTP(host=SMTP_HOST, port=SMTP_PORT) as server:
-            server.starttls()
-            server.login(SENDER_EMAIL, SMTP_PASSWORD)
-            msg = EmailMessage()
-            msg.set_content(body)
-            msg['Subject'] = 'Message added to DLQ Alert'
-            msg['From'] = SENDER_EMAIL
-            msg['To'] = RECEIVER_EMAIL
+        msg = EmailMessage()
+        msg.set_content(body)
+        msg["Subject"] = "DLQ recovery diagnostic"
+        msg["From"], msg["To"] = SENDER_EMAIL, RECEIVER_EMAIL
+        transport = smtplib.SMTP_SSL if SMTP_PORT == 465 else smtplib.SMTP
+        with transport(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            if SMTP_PORT != 465:
+                server.starttls()
+            if SMTP_PASSWORD:
+                server.login(SENDER_EMAIL, SMTP_PASSWORD)
             server.send_message(msg)
-            logger.info("Alert email sent successfully.")
-    except smtplib.SMTPException as e:
-        logger.error(f"Failed to send alert email: {e}")
+    except (OSError, smtplib.SMTPException):
+        logger.exception("Failed to send DLQ alert")
 
-def dlq_consumer():
-    for message in consumer:
-        logger.info(f"Starting diagnosis for message with key: {message.key} from partition: {message.partition} and offset: {message.offset}, that has been sent to the DLQ.")
-        diagnosis = _diagnose_failed_event(message.value['original_message'])
 
-        body = f"Message with key: {message.key} has failed validation and been sent to the DLQ.\n\nOriginal Message: {message.value['original_message']}\n\nFailure Metadata: {message.value['failure_metedata']}\n\nDiagnosis: {diagnosis}"
-        _send_alert(body)
+def _recover(record):
+    """Return the destination, payload and headers; never publish a failed candidate."""
 
-        message_adapted = _temporal_adaptation(message.value, diagnosis)
-
-        if message_adapted:
-            _resend_to_raw_topic(message_adapted)
+    #Explain
+    envelope = record.value if isinstance(record.value, dict) else {"original_message": record.value}
+    
+    metadata = envelope.get("failure_metadata", envelope.get("failure_metedata", {}))
+    metadata = metadata if isinstance(metadata, dict) else {}
+    headers = [(k, v) for k, v in (record.headers or []) if k != ATTEMPTS_HEADER]
+    attempts, diagnosis, final, reason = 0, None, None, "no_safe_correction"
+    try:
+        counts = [metadata.get("recovery_attempts", 0)]
+        counts.extend(v.decode("ascii") for k, v in (record.headers or []) if k == ATTEMPTS_HEADER)
+        if any(type(n) not in (int, str) or not re.fullmatch(r"[0-9]+", str(n)) for n in counts):
+            raise ValueError("Invalid recovery counter")
+        attempts = max(map(int, counts))
+        payload = envelope["original_message"]
+        diagnosis = check_schema(CONTRACT, [payload], ai_review=True, allow_extra=False,
+                                 context="Failed sale event from a curly hair products store")
+        
+        if attempts >= RECOVERY_ATTEMPTS_THRESHOLD:
+            reason = "recovery_limit_reached"
 
         else:
-            pass #TODO: Decide what to do here. We can either leave it in the DLQ or upload it to a database
+            adapted = _temporal_adaptation(payload, diagnosis)
+            if adapted is not None:
+                final = check_schema(CONTRACT, [adapted], ai_review=False, allow_extra=False)
+                if final["valid"]:
+                    headers.append((ATTEMPTS_HEADER, str(attempts + 1).encode("ascii")))
+                    logger.info("Recovered key=%s: %s", record.key, diagnosis)
+                    return RAW_TOPIC, adapted, headers, diagnosis
+                reason = "correction_failed_validation"
+
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        reason = f"invalid_recovery_input: {exc}"
+
+    parked = {**envelope, "failure_metadata": {**metadata, "recovery_attempts": attempts,
+              "recovery_reason": reason, "diagnosis": diagnosis, "revalidation": final}}
+    
+    headers.append((ATTEMPTS_HEADER, str(attempts).encode("ascii")))
+    return PARKING_LOT_TOPIC, parked, headers, diagnosis
+
+
+def dlq_consumer():
+    consumer = KafkaConsumer(
+        DLQ_TOPIC, bootstrap_servers=BOOTSTRAP_SERVERS,
+        value_deserializer=json.loads, key_deserializer=lambda k: json.loads(k) if k else None,
+        auto_offset_reset="earliest", enable_auto_commit=False, group_id="dlq-consumer-group",
+        max_poll_records=1,
+    )
+    producer = KafkaProducer(
+        bootstrap_servers=BOOTSTRAP_SERVERS,
+        value_serializer=lambda value: json.dumps(value).encode("utf-8"),
+        key_serializer=lambda key: json.dumps(key).encode("utf-8") if key is not None else None,
+        acks="all", enable_idempotence=True, retries=5, max_in_flight_requests_per_connection=1,
+    )
+    try:
+        for record in consumer:
+            topic, payload, headers, diagnosis = _recover(record)
+
+            producer.send(topic, value=payload, key=record.key, headers=headers).get(timeout=30)
+            consumer.commit({TopicPartition(record.topic, record.partition):
+                             OffsetAndMetadata(record.offset + 1, "")})
+            logger.info("Routed key=%s to %s", record.key, topic)
+            _send_alert(json.dumps({"topic": topic, "key": record.key, "diagnosis": diagnosis}, indent=2))
+    finally:
+        consumer.close()
+        producer.close()
 
 
 
-
- 

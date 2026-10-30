@@ -30,6 +30,8 @@ BOOTSTRAP_SERVERS = ["localhost:9092"]
 RAW_TOPIC = "raw-orders"
 PROCESSED_TOPIC = "processed-orders"
 DLQ_TOPIC = "dlq-orders"
+PARKING_LOT_TOPIC = "parking-lot-orders"
+RECOVERY_ATTEMPTS_THRESHOLD = 3
 
 CONTRACT_PATH = Path(__file__).parent / "data_contract.yml"
 CONTRACT = read_contract(CONTRACT_PATH)

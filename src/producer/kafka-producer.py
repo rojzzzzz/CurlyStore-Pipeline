@@ -7,8 +7,8 @@ import time
 
 producer = KafkaProducer(
     bootstrap_servers=BOOTSTRAP_SERVERS,
-    value_serializer=lambda m: json.dumps(m),
-    key_serializer=lambda k: json.dumps(k) if k else None,
+    value_serializer=lambda m: json.dumps(m).encode("utf-8"),
+    key_serializer=lambda k: json.dumps(k).encode("utf-8") if k is not None else None,
     acks="all",
     enable_idempotence=True,
     retries=5
