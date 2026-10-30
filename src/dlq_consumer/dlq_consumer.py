@@ -1,4 +1,12 @@
+from src.config import (
+    CONTRACT, DLQ_TOPIC, BOOTSTRAP_SERVERS, RAW_TOPIC, SENDER_EMAIL,
+    RECEIVER_EMAIL, SMTP_HOST, SMTP_PORT, SMTP_PASSWORD,
+    PARKING_LOT_TOPIC, RECOVERY_ATTEMPTS_THRESHOLD,
+)
+from kafka import KafkaConsumer, KafkaProducer, TopicPartition
+from src.SchemaDiagnoser.fn import check_schema
 from decimal import Decimal, InvalidOperation
+from kafka.structs import OffsetAndMetadata
 from email.message import EmailMessage
 import json
 import logging
@@ -6,14 +14,7 @@ import math
 import re
 import smtplib
 
-from kafka import KafkaConsumer, KafkaProducer, TopicPartition
-from kafka.structs import OffsetAndMetadata
-from src.config import (
-    CONTRACT, DLQ_TOPIC, BOOTSTRAP_SERVERS, RAW_TOPIC, SENDER_EMAIL,
-    RECEIVER_EMAIL, SMTP_HOST, SMTP_PORT, SMTP_PASSWORD,
-    PARKING_LOT_TOPIC, RECOVERY_ATTEMPTS_THRESHOLD,
-)
-from src.SchemaDiagnoser.fn import check_schema
+
 
 logger = logging.getLogger(__name__)
 ATTEMPTS_HEADER = "recovery_attempts"
@@ -39,14 +40,12 @@ def _temporal_adaptation(message: dict, diagnosis: dict) -> dict | None:
     normalize = lambda name: name.replace("_", "").casefold()
 
     for column in sorted(added):
-        #Explain
         matches = [name for name in (message.keys() - added) | missing
                    if normalize(name) == normalize(column)]
         
         if len(matches) == 1 and category in {"naming_change", "mixed_changes"}:
             target = matches[0]
-            
-            #Explain
+
             if sum(normalize(name) == normalize(column) for name in added) != 1:
                 return None
             if target in adapted:
@@ -55,7 +54,6 @@ def _temporal_adaptation(message: dict, diagnosis: dict) -> dict | None:
                         or type(value) is not type(existing) or value != existing):
                     return None
             else:
-                # Require AI to corroborate this exact missing/added pair.
                 pair = [next(i for i, c in enumerate(changes) if c["column"] == name)
                         for name in (target, column)]
                 if not any(r.get("category") == "possible_rename"
@@ -123,6 +121,8 @@ def _recover(record):
     attempts, diagnosis, final, reason = 0, None, None, "no_safe_correction"
     try:
         counts = [metadata.get("recovery_attempts", 0)]
+
+        #Explain
         counts.extend(v.decode("ascii") for k, v in (record.headers or []) if k == ATTEMPTS_HEADER)
         if any(type(n) not in (int, str) or not re.fullmatch(r"[0-9]+", str(n)) for n in counts):
             raise ValueError("Invalid recovery counter")

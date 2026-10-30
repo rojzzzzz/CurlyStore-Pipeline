@@ -24,6 +24,7 @@ consumer = KafkaConsumer(
 )
 
 try:
+    #AT-LEAST-ONCE commit strategy
     for message in consumer:
         try:
             diagnosis = check_schema(CONTRACT, [message.value], ai_review=False, allow_extra=False)
