@@ -26,19 +26,19 @@ def _request_api(url: str, session: requests.Session) -> dict:
 def get_orders() -> list:
     """Requests the orders from the event generator and returns them so kafka can send them to the topic."""
 
-    n = 1000000
+    n = 0
     while True:
         with requests.Session() as session:
 
-            if n <= 0:
+            if n >= 100000000:
                 break
 
             response = _request_api("http://localhost:8000/", session)
 
             if response:
                 producer.send(RAW_TOPIC, value=response, key={"order_id": response.get("order_id")})
-                time.sleep(2)
-                n -= 1
+                time.sleep(5)
+                n += 1
 
             else:
                 raise ValueError("No response received from the event generator API.")

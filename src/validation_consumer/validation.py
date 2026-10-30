@@ -5,13 +5,8 @@ import datetime
 import logging
 import json
 
-#TODO Implement the logger configuration in a separate file and import it here
 logger = logging.getLogger(__name__)
 
-def transform_message(message: dict) -> dict:
-    """Transforms the incoming, already validated message into the desired format for further processing"""
-
-    pass
 
 producer = KafkaProducer(
     bootstrap_servers=BOOTSTRAP_SERVERS,
@@ -33,23 +28,27 @@ consumer = KafkaConsumer(
 )
 
 logger.info(f"Validation consumer started and listening to the topic: {PROCESSED_TOPIC}")
+n = 0
 
-#Define EXACTLY-ONCE, AT-LEAST-ONCE, and AT-MOST-ONCE processing semantics for the consumer
 for message in consumer:
     logger.info(f"Message with key: {message.key} has been received from partition: {message.partition} and offset: {message.offset}")
+    n += 1
+
     diagnosis = check_schema(schema_contract=CONTRACT, incoming=[message.value])
 
     if diagnosis['valid']:
-        message = transform_message(message.value)
-        logger.info(f"Message with key: {message.key} has been validated and transformed successfully.")
+        logger.info(f"Message with key: {message.key} has been validated successfully. Sending to the processed topic.")
         producer.send(PROCESSED_TOPIC, value=message, key=message.key)
 
     else:
         metadata = {
-            "source_topic": RAW_TOPIC,
-            "source_partition": message.partition,
-            "source_offset": message.offset,
-            "failed_at": datetime.now().isoformat()
+        "event_id": f"evt-{n}",
+        "source_topic": RAW_TOPIC,
+        "source_partition": message.partition,
+        "source_offset": message.offset,
+        "contract_version": CONTRACT.get("version"),
+        "recovery_attempts": message.value.get("recovery_attempts", 0),
+        "original_payload": message.value
         }
 
         enriched_message = {
@@ -59,6 +58,10 @@ for message in consumer:
         
         logger.error(f"Message with key: {message.key} has failed validation and been sent to the DLQ.")
         producer.send(DLQ_TOPIC, value=enriched_message, key=message.key)
+
+    message.commit()
+
+
 
 
 
