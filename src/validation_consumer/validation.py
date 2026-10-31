@@ -1,8 +1,9 @@
 from src.config import BOOTSTRAP_SERVERS, PROCESSED_TOPIC, RAW_TOPIC, DLQ_TOPIC, CONTRACT
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from src.SchemaDiagnoser.fn import check_schema
+from src.messages import decode_message, event_data, preserve_original
 from kafka.structs import OffsetAndMetadata
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 import datetime
 import logging
 import json
@@ -12,14 +13,12 @@ logger = logging.getLogger(__name__)
 producer = KafkaProducer(
     bootstrap_servers=BOOTSTRAP_SERVERS,
     value_serializer=lambda value: json.dumps(value).encode("utf-8"),
-    key_serializer=lambda key: json.dumps(key).encode("utf-8") if key is not None else None,
     acks="all", enable_idempotence=True, retries=5,
     max_in_flight_requests_per_connection=1,
 )
 consumer = KafkaConsumer(
     RAW_TOPIC, bootstrap_servers=BOOTSTRAP_SERVERS,
-    value_deserializer=json.loads,
-    key_deserializer=lambda key: json.loads(key) if key else None,
+    value_deserializer=decode_message,
     auto_offset_reset="earliest", enable_auto_commit=False,
     group_id="validation-consumer-group", max_poll_records=1,
 )
@@ -28,22 +27,22 @@ try:
     #AT-LEAST-ONCE commit strategy
     for message in consumer:
 
-        CONTRACT = CONTRACT['contract']
-        message['event_id'] = str(uuid4())
-        event_type = "order" if message.value.get("order_id") else "refund"
         try:
-            if event_type == "order":
-                diagnosis = check_schema(CONTRACT['order'], [message.value], ai_review=False, allow_extra=False)
-            else:
-                diagnosis = check_schema(CONTRACT['refund'], [message.value], ai_review=False, allow_extra=False)
+            event_type, data = event_data(message.value)
+            diagnosis = check_schema(CONTRACT['contract'][event_type], [data], ai_review=False, allow_extra=False)
         except (TypeError, ValueError) as exc:
             diagnosis = {"valid": False, "error": str(exc)}
 
-        topic, payload = PROCESSED_TOPIC, message.value
+        topic = PROCESSED_TOPIC
+        payload = message.value.copy() if isinstance(message.value, dict) else message.value
+        if diagnosis["valid"]:
+            payload.setdefault('event_id', str(uuid5(NAMESPACE_URL, f"{message.topic}:{message.partition}:{message.offset}")))
+            payload.setdefault('event_type', event_type)
+            payload.setdefault('event_version', str(CONTRACT['version']))
         if not diagnosis["valid"]:
             topic = DLQ_TOPIC
             payload = {
-                "original_message": message.value,
+                "original_message": preserve_original(message.value),
                 "failure_metadata": {
                     "source_topic": message.topic,
                     "source_partition": message.partition,

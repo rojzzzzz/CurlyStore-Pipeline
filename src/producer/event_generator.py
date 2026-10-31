@@ -119,11 +119,14 @@ def _producer_refund() -> dict:
                     pwd=DATABASE_PASSWORD, encrypt="yes", trust_server_certificate="no",
                     timeout=60) as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT TOP 10 order_id FROM %(schema)s.orders WHERE status = 'completed' ORDER BY NEWID()", {"schema": SCHEMA})
+                schema = SCHEMA.replace("]", "]]")
+                cursor.execute(f"SELECT TOP 10 order_id, total_price FROM [{schema}].orders "
+                               "WHERE status = 'completed' ORDER BY NEWID()")
                 completed_orders = cursor.fetchall()
-
-                selected_order = random.choice(completed_orders)['order_id']
-                selected_id, selected_price = selected_order['order_id'], selected_order['total_price']
+                if not completed_orders:
+                    return _producer_sale()
+                selected_order = random.choice(completed_orders)
+                selected_id, selected_price = str(selected_order[0]), float(selected_order[1])
 
         n = random.random()
         refund_amount = round(selected_price / 2, 2)
@@ -135,7 +138,7 @@ def _producer_refund() -> dict:
             "refund_id": str(uuid.uuid4()),
             "order_id": selected_id,
             "refund_amount": refund_amount,
-            "refund_date": f"2026-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}",
+            "refunded_at": f"2026-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}",
             "reason": "Customer requested refund" if n < 0.5 else "Product defect",
         }
 
@@ -147,8 +150,6 @@ def _producer_refund() -> dict:
 
 @app.get("/")
 def produce_order() -> dict:
-    random.seed(67)
-
     n = random.random()
 
     if n <= 0.85:

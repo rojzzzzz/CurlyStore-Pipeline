@@ -24,12 +24,12 @@ contract:
       total_price: double
       order_date: string
   
-    refund:
-      schema:
-        refund_id: string
-        order_id: string
-        refund_amount: double
-        refunded_at: string
-        reason: string
+  refund:
+    schema:
+      refund_id: string
+      order_id: string
+      refund_amount: double
+      refunded_at: string
+      reason: string
         
 

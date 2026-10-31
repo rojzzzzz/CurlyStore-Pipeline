@@ -5,6 +5,7 @@ from src.config import (
 )
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from src.SchemaDiagnoser.fn import check_schema
+from src.messages import EVENT_METADATA, decode_message, event_data, preserve_original
 from decimal import Decimal, InvalidOperation
 from kafka.structs import OffsetAndMetadata
 from email.message import EmailMessage
@@ -112,8 +113,7 @@ def _send_alert(body: str):
 def _recover(record):
     """Return the destination, payload and headers; never publish a failed candidate."""
 
-    #Explain
-    envelope = record.value if isinstance(record.value, dict) else {"original_message": record.value}
+    envelope = record.value if isinstance(record.value, dict) else {"original_message": preserve_original(record.value)}
     
     metadata = envelope.get("failure_metadata", envelope.get("failure_metedata", {}))
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -122,26 +122,32 @@ def _recover(record):
     try:
         counts = [metadata.get("recovery_attempts", 0)]
 
-        #Explain
         counts.extend(v.decode("ascii") for k, v in (record.headers or []) if k == ATTEMPTS_HEADER)
         if any(type(n) not in (int, str) or not re.fullmatch(r"[0-9]+", str(n)) for n in counts):
             raise ValueError("Invalid recovery counter")
         attempts = max(map(int, counts))
         payload = envelope["original_message"]
-        diagnosis = check_schema(CONTRACT, [payload], ai_review=True, allow_extra=False,
-                                 context="Failed sale event from a curly hair products store")
+        event_type, data = event_data(payload)
+        contract = CONTRACT['contract'][event_type]
+        diagnosis = check_schema(contract, [data], ai_review=attempts < RECOVERY_ATTEMPTS_THRESHOLD, allow_extra=False,
+                                 context=f"Failed {event_type} event from a curly hair products store")
+
+        if diagnosis["valid"]:
+            headers.append((ATTEMPTS_HEADER, str(attempts).encode("ascii")))
+            return RAW_TOPIC, payload, headers, diagnosis
         
         if attempts >= RECOVERY_ATTEMPTS_THRESHOLD:
             reason = "recovery_limit_reached"
 
         else:
-            adapted = _temporal_adaptation(payload, diagnosis)
+            adapted = _temporal_adaptation(data, diagnosis)
             if adapted is not None:
-                final = check_schema(CONTRACT, [adapted], ai_review=False, allow_extra=False)
+                final = check_schema(contract, [adapted], ai_review=False, allow_extra=False)
                 if final["valid"]:
                     headers.append((ATTEMPTS_HEADER, str(attempts + 1).encode("ascii")))
                     logger.info("Recovered key=%s: %s", record.key, diagnosis)
-                    return RAW_TOPIC, adapted, headers, diagnosis
+                    recovered = {k: v for k, v in payload.items() if k in EVENT_METADATA}
+                    return RAW_TOPIC, {**recovered, **adapted}, headers, diagnosis
                 reason = "correction_failed_validation"
 
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
@@ -157,14 +163,13 @@ def _recover(record):
 def dlq_consumer():
     consumer = KafkaConsumer(
         DLQ_TOPIC, bootstrap_servers=BOOTSTRAP_SERVERS,
-        value_deserializer=json.loads, key_deserializer=lambda k: json.loads(k) if k else None,
+        value_deserializer=decode_message,
         auto_offset_reset="earliest", enable_auto_commit=False, group_id="dlq-consumer-group",
         max_poll_records=1,
     )
     producer = KafkaProducer(
         bootstrap_servers=BOOTSTRAP_SERVERS,
         value_serializer=lambda value: json.dumps(value).encode("utf-8"),
-        key_serializer=lambda key: json.dumps(key).encode("utf-8") if key is not None else None,
         acks="all", enable_idempotence=True, retries=5, max_in_flight_requests_per_connection=1,
     )
     try:
@@ -175,7 +180,7 @@ def dlq_consumer():
             consumer.commit({TopicPartition(record.topic, record.partition):
                              OffsetAndMetadata(record.offset + 1, "")})
             logger.info("Routed key=%s to %s", record.key, topic)
-            _send_alert(json.dumps({"topic": topic, "key": record.key, "diagnosis": diagnosis}, indent=2))
+            _send_alert(json.dumps({"topic": topic, "key": repr(record.key), "diagnosis": diagnosis}, indent=2))
     finally:
         consumer.close()
         producer.close()
