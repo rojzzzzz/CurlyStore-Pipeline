@@ -1,7 +1,8 @@
 from src.config import BOOTSTRAP_SERVERS, PROCESSED_TOPIC, RAW_TOPIC, DLQ_TOPIC, CONTRACT
-from src.SchemaDiagnoser.fn import check_schema
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
+from src.SchemaDiagnoser.fn import check_schema
 from kafka.structs import OffsetAndMetadata
+from uuid import uuid4
 import datetime
 import logging
 import json
@@ -26,8 +27,15 @@ consumer = KafkaConsumer(
 try:
     #AT-LEAST-ONCE commit strategy
     for message in consumer:
+
+        CONTRACT = CONTRACT['contract']
+        message['event_id'] = str(uuid4())
+        event_type = "order" if message.value.get("order_id") else "refund"
         try:
-            diagnosis = check_schema(CONTRACT, [message.value], ai_review=False, allow_extra=False)
+            if event_type == "order":
+                diagnosis = check_schema(CONTRACT['order'], [message.value], ai_review=False, allow_extra=False)
+            else:
+                diagnosis = check_schema(CONTRACT['refund'], [message.value], ai_review=False, allow_extra=False)
         except (TypeError, ValueError) as exc:
             diagnosis = {"valid": False, "error": str(exc)}
 
@@ -37,7 +45,6 @@ try:
             payload = {
                 "original_message": message.value,
                 "failure_metadata": {
-                    "event_id": f"{message.topic}:{message.partition}:{message.offset}",
                     "source_topic": message.topic,
                     "source_partition": message.partition,
                     "source_offset": message.offset,

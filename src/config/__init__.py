@@ -1,17 +1,19 @@
+from dotenv import load_dotenv
 from pathlib import Path
-import smtplib
 import logging
 import yaml
 import os
 
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 def _get_env(value: str) -> str:
-    value = os.getenv(value)
-    if value is None:
+    env_val = os.getenv(value)
+    if env_val is None:
         logger.error(f"Environment variable {value} is not set.")
         raise ValueError(f"Environment variable {value} is not set.")
-    return value
+    return env_val
 
 def read_contract(contract_path: Path | str) -> dict:
     try:
@@ -41,3 +43,10 @@ RECEIVER_EMAIL = _get_env("RECEIVER_EMAIL")
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 SMTP_PASSWORD = _get_env("SMTP_PASSWORD")
+
+DATABASE_SERVER = _get_env("DATABASE_SERVER")
+DATABASE_NAME = _get_env("DATABASE_NAME")
+DATABASE_USER = _get_env("DATABASE_USER")
+DATABASE_PASSWORD = _get_env("DATABASE_PASSWORD")
+SCHEMA = "curly_store"
+EVENTS_TABLE = "processsed_events"

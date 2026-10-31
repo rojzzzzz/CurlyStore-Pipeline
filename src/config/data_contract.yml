@@ -6,19 +6,30 @@ contract:
   contact: "roberto.jerez@example.com"
   description: "Sale events with flat store, product, and order fields."
 
-  schema:
-    order_id: string
-    store_id: integer
-    store_name: string
-    store_city: string
-    store_country: string
-    store_currency: string
-    product_id: integer
-    product_name: string
-    product_category: string
-    product_price: double
-    product_stock: integer
-    quantity: integer
-    status: string
-    total_price: double
-    order_date: string
+  order:
+    schema:
+      order_id: string
+      store_id: integer
+      store_name: string
+      store_city: string
+      store_country: string
+      store_currency: string
+      product_id: integer
+      product_name: string
+      product_category: string
+      product_price: double
+      product_stock: integer
+      quantity: integer
+      status: string
+      total_price: double
+      order_date: string
+  
+    refund:
+      schema:
+        refund_id: string
+        order_id: string
+        refund_amount: double
+        refunded_at: string
+        reason: string
+        
+

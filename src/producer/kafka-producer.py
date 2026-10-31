@@ -4,6 +4,7 @@ from kafka import KafkaProducer
 import requests
 import json
 import time
+import uuid
 
 producer = KafkaProducer(
     bootstrap_servers=BOOTSTRAP_SERVERS,
@@ -35,7 +36,11 @@ def get_orders() -> list:
 
             response = _request_api("http://localhost:8000/", session)
 
+
             if response:
+                response['event_id'] = str(uuid.uuid4())
+                response['event_version'] = "1"
+                
                 producer.send(RAW_TOPIC, value=response, key={"order_id": response.get("order_id")})
                 time.sleep(5)
                 n += 1

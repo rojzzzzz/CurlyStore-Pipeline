@@ -1,3 +1,4 @@
+from src.config import (DATABASE_SERVER, DATABASE_NAME, DATABASE_USER, DATABASE_PASSWORD, SCHEMA)
 from fastapi import FastAPI
 import random
 import uuid
@@ -85,9 +86,11 @@ STORES = [
     {"id": 10, "name": "Pure Curl Collective", "city": "Austin", "country": "USA", "currency": "USD"},
 ]
 
+
 def _producer_sale() -> dict:
     store = random.choice(STORES)
     product = random.choice(PRODUCTS)
+
 
     order = {
         "order_id": str(uuid.uuid4()),
@@ -108,6 +111,39 @@ def _producer_sale() -> dict:
     order['order_date'] = f"2026-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
     return order
 
+def _producer_refund() -> dict:
+    from mssql_python import connect, OperationalError, ConnectionStringParseError
+
+    try:
+        with connect(server=DATABASE_SERVER, database=DATABASE_NAME, uid=DATABASE_USER,
+                    pwd=DATABASE_PASSWORD, encrypt="yes", trust_server_certificate="no",
+                    timeout=60) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT TOP 10 order_id FROM %(schema)s.orders WHERE status = 'completed' ORDER BY NEWID()", {"schema": SCHEMA})
+                completed_orders = cursor.fetchall()
+
+                selected_order = random.choice(completed_orders)['order_id']
+                selected_id, selected_price = selected_order['order_id'], selected_order['total_price']
+
+        n = random.random()
+        refund_amount = round(selected_price / 2, 2)
+
+        if n < 0.4:
+            refund_amount = round(selected_price * random.random(), 2)
+
+        return {
+            "refund_id": str(uuid.uuid4()),
+            "order_id": selected_id,
+            "refund_amount": refund_amount,
+            "refund_date": f"2026-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}",
+            "reason": "Customer requested refund" if n < 0.5 else "Product defect",
+        }
+
+    except (OperationalError, ConnectionStringParseError) as e:
+        return _producer_sale() # Most likely case is that the database is empty, so we will just produce a sale event instead.
+    
+
+
 
 @app.get("/")
 def produce_order() -> dict:
@@ -115,8 +151,10 @@ def produce_order() -> dict:
 
     n = random.random()
 
-    if n < 0.79:
+    if n <= 0.85:
         return _producer_sale()
+    else:
+        return _producer_refund()
 
 
     
