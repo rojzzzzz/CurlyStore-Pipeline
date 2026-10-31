@@ -3,17 +3,17 @@ from src.config import (
     RECEIVER_EMAIL, SMTP_HOST, SMTP_PORT, SMTP_PASSWORD,
     PARKING_LOT_TOPIC, RECOVERY_ATTEMPTS_THRESHOLD,
 )
+from src.messages import EVENT_METADATA, decode_message, event_data, preserve_original
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from src.SchemaDiagnoser.fn import check_schema
-from src.messages import EVENT_METADATA, decode_message, event_data, preserve_original
 from decimal import Decimal, InvalidOperation
 from kafka.structs import OffsetAndMetadata
 from email.message import EmailMessage
-import json
+import smtplib
 import logging
+import json
 import math
 import re
-import smtplib
 
 
 
@@ -173,13 +173,14 @@ def dlq_consumer():
         acks="all", enable_idempotence=True, retries=5, max_in_flight_requests_per_connection=1,
     )
     try:
+        #AT-LEAST-ONCE
         for record in consumer:
             topic, payload, headers, diagnosis = _recover(record)
 
             producer.send(topic, value=payload, key=record.key, headers=headers).get(timeout=30)
             consumer.commit({TopicPartition(record.topic, record.partition):
                              OffsetAndMetadata(record.offset + 1, "")})
-            logger.info("Routed key=%s to %s", record.key, topic)
+            logger.info(f"Routed key={record.key} to {topic}")
             _send_alert(json.dumps({"topic": topic, "key": repr(record.key), "diagnosis": diagnosis}, indent=2))
     finally:
         consumer.close()

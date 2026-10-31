@@ -1,4 +1,5 @@
 from base64 import b64encode
+from uuid import UUID
 import json
 
 
@@ -20,9 +21,15 @@ def preserve_original(value):
 
 
 def event_data(message: dict) -> tuple[str, dict]:
+
     if not isinstance(message, dict):
         raise TypeError("Event must be a JSON object.")
+    if "event_id" in message:
+        event_id = message["event_id"]
+        if not isinstance(event_id, str) or str(UUID(event_id)) != event_id.lower():
+            raise ValueError("Event ID must be a UUID string.")
     event_type = message.get("event_type")
+
     if "event_type" not in message:
         event_type = "refund" if "refund_id" in message else "order" if "order_id" in message else None
     if event_type not in ("order", "refund"):

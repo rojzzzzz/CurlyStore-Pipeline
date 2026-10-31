@@ -18,7 +18,7 @@ class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.config = ModuleType("src.config")
         self.config.CONTRACT = yaml.safe_load((ROOT / "src/config/data_contract.yml").read_text())
-        for name in ("RAW_TOPIC", "PROCESSED_TOPIC", "DLQ_TOPIC", "PARKING_LOT_TOPIC",
+        for name in ("RAW_TOPIC", "VALIDATED_TOPIC", "DLQ_TOPIC", "PARKING_LOT_TOPIC",
                      "SENDER_EMAIL", "RECEIVER_EMAIL", "SMTP_HOST", "SMTP_PASSWORD",
                      "DATABASE_SERVER", "DATABASE_NAME", "DATABASE_USER", "DATABASE_PASSWORD"):
             setattr(self.config, name, name)
@@ -26,14 +26,16 @@ class PipelineTests(unittest.TestCase):
         self.config.RECOVERY_ATTEMPTS_THRESHOLD = 3
         self.config.SMTP_PORT = 465
         self.config.SCHEMA = "curly_store"
+        self.config.EVENTS_TABLE = "processed_events"
         self.config_patch = patch.dict(sys.modules, {"src.config": self.config})
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
         self.generator = runpy.run_path(str(ROOT / "src/producer/event_generator.py"))
         self.order = self.generator["_producer_sale"]()
-        self.order.update(event_id="source-id", event_version="1", event_type="order")
+        self.order.update(event_id="A94CBBA9-9C25-4E58-8453-2E83F92A19CD", event_version="1", event_type="order")
         self.refund = dict(refund_id="r", order_id="o", refund_amount=1.5,
-                           refunded_at="2026-01-01", reason="Returned", event_type="refund")
+                           refunded_at="2026-01-01", reason="Returned", event_type="refund",
+                           event_id="b94cbba9-9c25-4e58-8453-2e83f92a19cd")
 
     def record(self, value, offset=0, headers=None):
         return SimpleNamespace(value=value, key=b"opaque-key", headers=headers or [],
@@ -61,7 +63,7 @@ class PipelineTests(unittest.TestCase):
     def test_orders_and_refunds_pass_without_mutation(self):
         producer, consumer, records = self.validate([self.order, self.refund])
         self.assertEqual(consumer.commit.call_count, 2)
-        self.assertEqual([c.args[0] for c in producer.send.call_args_list], [self.config.PROCESSED_TOPIC] * 2)
+        self.assertEqual([c.args[0] for c in producer.send.call_args_list], [self.config.VALIDATED_TOPIC] * 2)
         self.assertEqual(producer.send.call_args_list[0].kwargs["value"], self.order)
         self.assertEqual(records[0].value, self.order)
         self.assertEqual(producer.send.call_args.kwargs["key"], b"opaque-key")
@@ -87,7 +89,7 @@ class PipelineTests(unittest.TestCase):
         producer, consumer, _ = self.validate(values)
         self.assertEqual(consumer.commit.call_count, len(values))
         self.assertEqual([c.args[0] for c in producer.send.call_args_list],
-                         [self.config.DLQ_TOPIC] * 5 + [self.config.PROCESSED_TOPIC])
+                         [self.config.DLQ_TOPIC] * 5 + [self.config.VALIDATED_TOPIC])
         import base64
         original = producer.send.call_args_list[4].kwargs["value"]["original_message"]
         self.assertEqual(base64.b64decode(original["data"]), b"\xff")
@@ -194,6 +196,66 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "delivery failed"):
             self.validate([self.order], producer)
         producer.close.assert_called_once()
+
+    def test_invalid_event_ids_are_preserved_in_dlq_and_parked(self):
+        recover = self.recovery()["_recover"]
+        for event in (self.order, self.refund):
+            for event_id in (None, "", 123, "not-a-uuid"):
+                invalid = {**event, "event_id": event_id}
+                producer, _, _ = self.validate([invalid])
+                self.assertEqual(producer.send.call_args.args[0], self.config.DLQ_TOPIC)
+                envelope = producer.send.call_args.kwargs["value"]
+                topic, parked, _, _ = recover(self.record(envelope))
+                self.assertEqual(topic, self.config.PARKING_LOT_TOPIC)
+                self.assertEqual(parked["original_message"], invalid)
+
+    def uploader(self):
+        driver = ModuleType("mssql_python")
+        driver.connect = MagicMock()
+        driver.OperationalError = type("OperationalError", (Exception,), {})
+        driver.ConnectionStringParseError = type("ConnectionStringParseError", (Exception,), {})
+        with patch.dict(sys.modules, mssql_python=driver):
+            upload = runpy.run_path(str(ROOT / "src/upload/uploader.py"))["upload_event"]
+        conn = driver.connect.return_value.__enter__.return_value
+        cursor = conn.cursor.return_value.__enter__.return_value
+        return upload, driver, cursor
+
+    def test_upload_preserves_ids_and_continues_after_duplicate(self):
+        upload, driver, cursor = self.uploader()
+        events = [self.order, self.order, self.refund]
+        before = copy.deepcopy(events)
+        cursor.fetchone.side_effect = [None, (self.order["event_id"],), None]
+        consumer = MagicMock()
+        consumer.__iter__.return_value = iter(self.record(e, i) for i, e in enumerate(events))
+        with patch("kafka.KafkaConsumer", return_value=consumer):
+            upload()
+        inserts = [c.args for c in cursor.execute.call_args_list if c.args[0].startswith("INSERT")]
+        self.assertEqual(len(inserts), 4)
+        self.assertEqual([params["event_id"] for _, params in inserts],
+                         [self.order["event_id"]] * 2 + [self.refund["event_id"]] * 2)
+        self.assertEqual(inserts[0][1]["occurred_at"], self.order["order_date"])
+        self.assertEqual(inserts[2][1]["occurred_at"], self.refund["refunded_at"])
+        self.assertEqual(inserts[1][1]["total_price"], self.order["total_price"])
+        self.assertEqual([sql.split()[2] for sql, _ in inserts],
+                         ["[curly_store].[processed_events]", "[curly_store].orders",
+                          "[curly_store].[processed_events]", "[curly_store].refunds"])
+        self.assertEqual(consumer.commit.call_count, 3)
+        self.assertEqual(events, before)
+        consumer.close.assert_called_once()
+
+    def test_upload_does_not_acknowledge_failed_transaction(self):
+        for event in (self.order, self.refund):
+            upload, driver, cursor = self.uploader()
+            cursor.fetchone.return_value = None
+            cursor.execute.side_effect = [None, None, driver.OperationalError("insert failed")]
+            consumer = MagicMock()
+            consumer.__iter__.return_value = iter([self.record(event)])
+            with patch("kafka.KafkaConsumer", return_value=consumer):
+                with self.assertRaisesRegex(driver.OperationalError, "insert failed"):
+                    upload()
+            consumer.commit.assert_not_called()
+            self.assertIs(driver.connect.return_value.__exit__.call_args.args[0], driver.OperationalError)
+            consumer.close.assert_called_once()
 
 
 if __name__ == "__main__":

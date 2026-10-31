@@ -1,4 +1,3 @@
-from src.config import (DATABASE_SERVER, DATABASE_NAME, DATABASE_USER, DATABASE_PASSWORD, SCHEMA)
 from fastapi import FastAPI
 import random
 import uuid
@@ -112,6 +111,7 @@ def _producer_sale() -> dict:
     return order
 
 def _producer_refund() -> dict:
+    from src.config import (DATABASE_SERVER, DATABASE_NAME, DATABASE_USER, DATABASE_PASSWORD, SCHEMA)
     from mssql_python import connect, OperationalError, ConnectionStringParseError
 
     try:
@@ -124,30 +124,30 @@ def _producer_refund() -> dict:
                                "WHERE status = 'completed' ORDER BY NEWID()")
                 completed_orders = cursor.fetchall()
                 if not completed_orders:
-                    return _producer_sale()
+                    return _producer_sale() #There are no orders to refund, so produce a sale instead
                 selected_order = random.choice(completed_orders)
                 selected_id, selected_price = str(selected_order[0]), float(selected_order[1])
 
         n = random.random()
-        refund_amount = round(selected_price / 2, 2)
 
-        if n < 0.4:
+        # 50% chance of full refund, 30% chance of half refund, 20% chance of random refund amount
+        refund_amount = round(selected_price, 2)
+        if n <= 0.2:
             refund_amount = round(selected_price * random.random(), 2)
+        elif n <= 0.5:
+            refund_amount = round(selected_price / 2, 2)
 
         return {
             "refund_id": str(uuid.uuid4()),
             "order_id": selected_id,
             "refund_amount": refund_amount,
             "refunded_at": f"2026-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}",
-            "reason": "Customer requested refund" if n < 0.5 else "Product defect",
+            "reason": random.choice(["Product Defect", "Late Delivery", "Changed Mind", "Wrong Item Sent", "Other"]),
         }
 
     except (OperationalError, ConnectionStringParseError) as e:
-        return _producer_sale() # Most likely case is that the database is empty, so we will just produce a sale event instead.
-    
-
-
-
+        return _producer_sale() 
+        
 @app.get("/")
 def produce_order() -> dict:
     n = random.random()

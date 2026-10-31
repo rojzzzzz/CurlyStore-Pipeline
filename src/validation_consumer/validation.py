@@ -1,4 +1,4 @@
-from src.config import BOOTSTRAP_SERVERS, PROCESSED_TOPIC, RAW_TOPIC, DLQ_TOPIC, CONTRACT
+from src.config import BOOTSTRAP_SERVERS, VALIDATED_TOPIC, RAW_TOPIC, DLQ_TOPIC, CONTRACT
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from src.SchemaDiagnoser.fn import check_schema
 from src.messages import decode_message, event_data, preserve_original
@@ -24,7 +24,7 @@ consumer = KafkaConsumer(
 )
 
 try:
-    #AT-LEAST-ONCE commit strategy
+    #Strategy used for idempotency: AT-LEAST-ONCE commit with idempotent producer (Check event_id existence in downstream systems to detect duplicates)
     for message in consumer:
 
         try:
@@ -33,12 +33,13 @@ try:
         except (TypeError, ValueError) as exc:
             diagnosis = {"valid": False, "error": str(exc)}
 
-        topic = PROCESSED_TOPIC
+        topic = VALIDATED_TOPIC
         payload = message.value.copy() if isinstance(message.value, dict) else message.value
+
         if diagnosis["valid"]:
             payload.setdefault('event_id', str(uuid5(NAMESPACE_URL, f"{message.topic}:{message.partition}:{message.offset}")))
             payload.setdefault('event_type', event_type)
-            payload.setdefault('event_version', str(CONTRACT['version']))
+
         if not diagnosis["valid"]:
             topic = DLQ_TOPIC
             payload = {
@@ -57,7 +58,7 @@ try:
                       headers=message.headers or []).get(timeout=30)
         consumer.commit({TopicPartition(message.topic, message.partition):
                          OffsetAndMetadata(message.offset + 1, "")})
-        logger.info("Routed key=%s to %s", message.key, topic)
+        logger.info(f"Routed key={message.key} to {topic}")
 finally:
     consumer.close()
     producer.close()

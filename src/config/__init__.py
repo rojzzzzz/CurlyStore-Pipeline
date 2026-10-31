@@ -30,7 +30,7 @@ def read_contract(contract_path: Path | str) -> dict:
 
 BOOTSTRAP_SERVERS = ["localhost:9092"]
 RAW_TOPIC = "raw-orders"
-PROCESSED_TOPIC = "processed-orders"
+VALIDATED_TOPIC = "processed-orders"
 DLQ_TOPIC = "dlq-orders"
 PARKING_LOT_TOPIC = "parking-lot-orders"
 RECOVERY_ATTEMPTS_THRESHOLD = 3
@@ -49,4 +49,4 @@ DATABASE_NAME = _get_env("DATABASE_NAME")
 DATABASE_USER = _get_env("DATABASE_USER")
 DATABASE_PASSWORD = _get_env("DATABASE_PASSWORD")
 SCHEMA = "curly_store"
-EVENTS_TABLE = "processsed_events"
+EVENTS_TABLE = "processed_events"
