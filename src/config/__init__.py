@@ -28,7 +28,7 @@ def read_contract(contract_path: Path | str) -> dict:
         raise 
 
 
-BOOTSTRAP_SERVERS = ["localhost:9092"]
+BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092").split(",")
 RAW_TOPIC = "raw-orders"
 VALIDATED_TOPIC = "processed-orders"
 DLQ_TOPIC = "dlq-orders"

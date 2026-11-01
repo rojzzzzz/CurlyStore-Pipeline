@@ -199,4 +199,8 @@ def dlq_consumer():
         producer.close()
 
 
+if __name__ == "__main__":
+    dlq_consumer()
+
+
 

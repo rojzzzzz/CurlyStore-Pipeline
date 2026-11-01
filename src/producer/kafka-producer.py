@@ -4,6 +4,7 @@ from src.messages import event_data
 from kafka import KafkaProducer
 import requests
 import json
+import os
 import time
 import uuid
 
@@ -31,7 +32,7 @@ def get_orders() -> None:
     try:
         with requests.Session() as session:
             for _ in range(100000000):
-                response = _request_api("http://localhost:8000/", session)
+                response = _request_api(os.getenv("EVENT_GENERATOR_URL", "http://localhost:8000/"), session)
                 if not response:
                     raise ValueError("No response received from the event generator API.")
                 event_type, _ = event_data(response)
@@ -43,4 +44,7 @@ def get_orders() -> None:
                 time.sleep(5)
     finally:
         producer.close()
-    
+
+
+if __name__ == "__main__":
+    get_orders()

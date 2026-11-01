@@ -163,9 +163,38 @@ class PipelineTests(unittest.TestCase):
 
     def test_generator_can_choose_both_event_types(self):
         generate = self.generator["produce_order"]
-        with patch.dict(generate.__globals__, random=random.Random(67),
-                        _producer_sale=lambda: "order", _producer_refund=lambda: "refund"):
-            self.assertEqual({generate() for _ in range(100)}, {"order", "refund"})
+        with patch.dict(generate.__globals__, _producer_sale=lambda: self.order.copy(),
+                        _producer_refund=lambda: self.refund.copy()):
+            with patch("random.random", side_effect=[0.0, 0.07, 0.99, 0.07]):
+                self.assertEqual([generate(), generate()], [self.order, self.refund])
+
+    def test_generated_drift_is_repairable_or_parked(self):
+        generate = self.generator["produce_order"]
+        recover = self.recovery()["_recover"]
+        review = {"status": "completed", "diagnosis": {
+            "category": "representation_change", "probability": .99}}
+        for event, field, choice in ((self.order, "quantity", 0.0), (self.refund, "refund_amount", .99)):
+            for drift_choice in (.699, .70):
+                with patch.dict(generate.__globals__, _producer_sale=lambda: event.copy(),
+                                _producer_refund=lambda: event.copy()):
+                    with patch("random.random", side_effect=[choice, .069, drift_choice]):
+                        drifted = generate()
+                expected = event.copy()
+                if drift_choice < .70:
+                    expected[field] = str(expected[field])
+                else:
+                    del expected[field]
+                self.assertEqual(drifted, expected)
+                producer, _, _ = self.validate([drifted])
+                self.assertEqual(producer.send.call_args.args[0], self.config.DLQ_TOPIC)
+                with patch("src.SchemaDiagnoser.fn._review", return_value=review):
+                    topic, payload, _, _ = recover(self.record(producer.send.call_args.kwargs["value"]))
+                if drift_choice < .70:
+                    self.assertEqual(topic, self.config.RAW_TOPIC)
+                    self.assertEqual(payload, event)
+                else:
+                    self.assertEqual(topic, self.config.PARKING_LOT_TOPIC)
+                    self.assertEqual(payload["original_message"], drifted)
 
     def test_refund_uses_selected_price_and_handles_empty_table(self):
         driver = ModuleType("mssql_python")

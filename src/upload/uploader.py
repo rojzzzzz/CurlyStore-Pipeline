@@ -174,3 +174,7 @@ def upload_event():
         consumer.close()
         if producer is not None:
             producer.close()
+
+
+if __name__ == "__main__":
+    upload_event()

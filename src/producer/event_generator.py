@@ -153,9 +153,17 @@ def produce_order() -> dict:
     n = random.random()
 
     if n <= 0.85:
-        return _producer_sale()
+        event = _producer_sale()
     else:
-        return _producer_refund()
+        event = _producer_refund()
+
+    if random.random() < 0.07:
+        field = "refund_amount" if "refund_id" in event else "quantity"
+        if random.random() < 0.70:
+            event[field] = str(event[field]) 
+        else:
+            del event[field] 
+    return event
 
 
     
