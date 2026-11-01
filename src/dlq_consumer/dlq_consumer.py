@@ -43,7 +43,7 @@ def _temporal_adaptation(message: dict, diagnosis: dict) -> dict | None:
     for column in sorted(added):
         matches = [name for name in (message.keys() - added) | missing
                    if normalize(name) == normalize(column)]
-        
+
         if len(matches) == 1 and category in {"naming_change", "mixed_changes"}:
             target = matches[0]
 
@@ -93,11 +93,20 @@ def _temporal_adaptation(message: dict, diagnosis: dict) -> dict | None:
     return adapted if added or any(c["issues"] == ["type_changed"] for c in changes) else None
 
 
-def _send_alert(body: str):
+def _send_alert(record, parked):
     try:
+        metadata = parked["failure_metadata"]
         msg = EmailMessage()
-        msg.set_content(body)
-        msg["Subject"] = "DLQ recovery diagnostic"
+        msg.set_content(
+            f"A record could not be recovered and was selected for {PARKING_LOT_TOPIC}.\n\n"
+            f"Record key: {record.key!r}\n"
+            f"Validation failed at: {metadata.get('failed_at', 'Unavailable')}\n"
+            f"Recovery reason: {metadata.get('recovery_reason', 'Unavailable')}\n\n"
+            f"Diagnosis:\n{json.dumps(metadata.get('diagnosis'), indent=2, default=str)}"
+        )
+        reason = str(metadata.get("recovery_reason") or "unknown").replace("\r", " ").replace("\n", " ")[:100]
+        key = repr(record.key).replace("\r", " ").replace("\n", " ")[:100]
+        msg["Subject"] = f"Parking lot: {key} - {reason}"
         msg["From"], msg["To"] = SENDER_EMAIL, RECEIVER_EMAIL
         transport = smtplib.SMTP_SSL if SMTP_PORT == 465 else smtplib.SMTP
         with transport(SMTP_HOST, SMTP_PORT, timeout=10) as server:
@@ -114,11 +123,12 @@ def _recover(record):
     """Return the destination, payload and headers; never publish a failed candidate."""
 
     envelope = record.value if isinstance(record.value, dict) else {"original_message": preserve_original(record.value)}
-    
+
     metadata = envelope.get("failure_metadata", envelope.get("failure_metedata", {}))
     metadata = metadata if isinstance(metadata, dict) else {}
     headers = [(k, v) for k, v in (record.headers or []) if k != ATTEMPTS_HEADER]
     attempts, diagnosis, final, reason = 0, None, None, "no_safe_correction"
+
     try:
         counts = [metadata.get("recovery_attempts", 0)]
 
@@ -135,16 +145,17 @@ def _recover(record):
         if diagnosis["valid"]:
             headers.append((ATTEMPTS_HEADER, str(attempts).encode("ascii")))
             return RAW_TOPIC, payload, headers, diagnosis
-        
+
         if attempts >= RECOVERY_ATTEMPTS_THRESHOLD:
             reason = "recovery_limit_reached"
 
         else:
+            attempts += 1
             adapted = _temporal_adaptation(data, diagnosis)
             if adapted is not None:
                 final = check_schema(contract, [adapted], ai_review=False, allow_extra=False)
                 if final["valid"]:
-                    headers.append((ATTEMPTS_HEADER, str(attempts + 1).encode("ascii")))
+                    headers.append((ATTEMPTS_HEADER, str(attempts).encode("ascii")))
                     logger.info("Recovered key=%s: %s", record.key, diagnosis)
                     recovered = {k: v for k, v in payload.items() if k in EVENT_METADATA}
                     return RAW_TOPIC, {**recovered, **adapted}, headers, diagnosis
@@ -155,7 +166,7 @@ def _recover(record):
 
     parked = {**envelope, "failure_metadata": {**metadata, "recovery_attempts": attempts,
               "recovery_reason": reason, "diagnosis": diagnosis, "revalidation": final}}
-    
+
     headers.append((ATTEMPTS_HEADER, str(attempts).encode("ascii")))
     return PARKING_LOT_TOPIC, parked, headers, diagnosis
 
@@ -181,7 +192,8 @@ def dlq_consumer():
             consumer.commit({TopicPartition(record.topic, record.partition):
                              OffsetAndMetadata(record.offset + 1, "")})
             logger.info(f"Routed key={record.key} to {topic}")
-            _send_alert(json.dumps({"topic": topic, "key": repr(record.key), "diagnosis": diagnosis}, indent=2))
+            if topic == PARKING_LOT_TOPIC:
+                _send_alert(record, payload)
     finally:
         consumer.close()
         producer.close()

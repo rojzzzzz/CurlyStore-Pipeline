@@ -133,7 +133,7 @@ def _producer_refund() -> dict:
         # 50% chance of full refund, 30% chance of half refund, 20% chance of random refund amount
         refund_amount = round(selected_price, 2)
         if n <= 0.2:
-            refund_amount = round(selected_price * random.random(), 2)
+            refund_amount = max(0.01, round(selected_price * random.random(), 2))
         elif n <= 0.5:
             refund_amount = round(selected_price / 2, 2)
 

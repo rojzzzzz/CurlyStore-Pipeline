@@ -1,4 +1,5 @@
 import copy
+from decimal import Decimal
 import json
 import random
 from pathlib import Path
@@ -126,18 +127,21 @@ class PipelineTests(unittest.TestCase):
         recover = self.recovery()["_recover"]
         for value in (None, [], {}, {"original_message": {**self.order, "quantity": "bad"}}):
             with self.subTest(value=value):
-                topic, _, _, _ = recover(self.record(value, headers=[("recovery_attempts", b"3")]))
+                topic, _, headers, _ = recover(self.record(value, headers=[("recovery_attempts", b"3")]))
                 self.assertEqual(topic, self.config.PARKING_LOT_TOPIC)
+                self.assertIn(("recovery_attempts", b"3"), headers)
 
     def test_failed_correction_is_not_published(self):
         recover = self.recovery()["_recover"]
         invalid = {**self.order, "quantity": "bad"}
         with patch.dict(recover.__globals__, _temporal_adaptation=lambda *args: {"quantity": 2}):
             with patch("src.SchemaDiagnoser.fn._review", return_value={"status": "failed"}):
-                topic, payload, _, _ = recover(self.record({"original_message": invalid}))
+                topic, payload, headers, _ = recover(self.record({"original_message": invalid}))
         self.assertEqual(topic, self.config.PARKING_LOT_TOPIC)
         self.assertEqual(payload["original_message"], invalid)
         self.assertFalse(payload["failure_metadata"]["revalidation"]["valid"])
+        self.assertEqual(payload["failure_metadata"]["recovery_attempts"], 1)
+        self.assertIn(("recovery_attempts", b"1"), headers)
 
     def test_dlq_consumer_preserves_keys_and_parks_malformed_json(self):
         module = self.recovery()
@@ -177,6 +181,8 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(refund["refund_amount"], 5.0)
             self.assertIn("refunded_at", refund)
             self.assertIn("total_price", cursor.execute.call_args.args[0])
+            with patch("random.random", return_value=0.0):
+                self.assertEqual(self.generator["_producer_refund"]()["refund_amount"], 0.01)
             cursor.fetchall.return_value = []
             self.assertIn("order_id", self.generator["_producer_refund"]())
 
@@ -224,7 +230,7 @@ class PipelineTests(unittest.TestCase):
         upload, driver, cursor = self.uploader()
         events = [self.order, self.order, self.refund]
         before = copy.deepcopy(events)
-        cursor.fetchone.side_effect = [None, (self.order["event_id"],), None]
+        cursor.fetchone.side_effect = [None, (self.order["event_id"],), None, (10,), (0,)]
         consumer = MagicMock()
         consumer.__iter__.return_value = iter(self.record(e, i) for i, e in enumerate(events))
         with patch("kafka.KafkaConsumer", return_value=consumer):
@@ -256,6 +262,81 @@ class PipelineTests(unittest.TestCase):
             consumer.commit.assert_not_called()
             self.assertIs(driver.connect.return_value.__exit__.call_args.args[0], driver.OperationalError)
             consumer.close.assert_called_once()
+
+    def test_refunds_check_remaining_total_and_update_status(self):
+        for amount, refunded, status in ((1.5, 0, "partially_refunded"), (1.5, 8.5, "refunded"),
+                                         (1.5, 9, None), (0, 0, None)):
+            upload, _, cursor = self.uploader()
+            cursor.fetchone.side_effect = [(Decimal("10"),), (Decimal(str(refunded)),)]
+            insert = upload.__globals__["_insert_refund"]
+            event = {**self.refund, "refund_amount": amount}
+            if status is None:
+                with self.assertRaises(ValueError):
+                    insert(cursor, event)
+                self.assertEqual(cursor.execute.call_count, 2)
+            else:
+                insert(cursor, event)
+                self.assertEqual(cursor.execute.call_args.args[1]["status"], status)
+                self.assertEqual(cursor.execute.call_args_list[2].args[1]["event_id"], event["event_id"])
+
+    def test_rejected_refund_is_parked_before_acknowledging_and_continuing(self):
+        for delivery_fails in (False, True):
+            upload, driver, cursor = self.uploader()
+            cursor.fetchone.side_effect = [None, (Decimal("10"),), (Decimal("10"),), None]
+            consumer, producer = MagicMock(), Mock()
+            records = [self.record(self.refund, headers=[("source", b"test")]),
+                       self.record(self.order, offset=1)]
+            original = copy.deepcopy(self.refund)
+            consumer.__iter__.return_value = iter(records)
+            calls = Mock()
+            calls.attach_mock(driver.connect.return_value.__exit__, "transaction_exit")
+            calls.attach_mock(producer.send.return_value.get, "delivery")
+            calls.attach_mock(consumer.commit, "acknowledge")
+            if delivery_fails:
+                producer.send.return_value.get.side_effect = RuntimeError("parking failed")
+            with patch("kafka.KafkaConsumer", return_value=consumer), \
+                    patch("kafka.KafkaProducer", return_value=producer):
+                if delivery_fails:
+                    with self.assertRaisesRegex(RuntimeError, "parking failed"):
+                        upload()
+                else:
+                    upload()
+            self.assertEqual([c[0] for c in calls.mock_calls],
+                             ["transaction_exit", "delivery"] if delivery_fails else
+                             ["transaction_exit", "delivery", "acknowledge", "transaction_exit", "acknowledge"])
+            self.assertIs(calls.mock_calls[0].args[0], upload.__globals__["RefundRejected"])
+            sent = producer.send.call_args
+            self.assertEqual(sent.args[0], self.config.PARKING_LOT_TOPIC)
+            self.assertEqual(sent.kwargs["value"]["original_message"], original)
+            self.assertEqual(self.refund, original)
+            self.assertIn("remaining order total", sent.kwargs["value"]["failure_metadata"]["recovery_reason"])
+            self.assertEqual(sent.kwargs["key"], records[0].key)
+            self.assertEqual(sent.kwargs["headers"], records[0].headers)
+            order_inserts = [c for c in cursor.execute.call_args_list if "INSERT INTO [curly_store].orders" in c.args[0]]
+            self.assertEqual(len(order_inserts), 0 if delivery_fails else 1)
+            consumer.close.assert_called_once()
+            producer.close.assert_called_once()
+
+    def test_parking_alert_follows_successful_delivery_only(self):
+        for fails in (False, True):
+            consume = self.recovery()["dlq_consumer"]
+            consumer, producer, alert = MagicMock(), Mock(), Mock()
+            consumer.__iter__.return_value = iter([self.record({"original_message": None})])
+            calls = Mock()
+            calls.attach_mock(producer.send.return_value.get, "delivery")
+            calls.attach_mock(consumer.commit, "commit")
+            calls.attach_mock(alert, "alert")
+            if fails:
+                producer.send.return_value.get.side_effect = RuntimeError("delivery failed")
+            with patch.dict(consume.__globals__, KafkaConsumer=lambda *a, **kw: consumer,
+                            KafkaProducer=lambda **kw: producer, _send_alert=alert):
+                if fails:
+                    with self.assertRaisesRegex(RuntimeError, "delivery failed"):
+                        consume()
+                else:
+                    consume()
+            self.assertEqual([call[0] for call in calls.mock_calls],
+                             ["delivery"] if fails else ["delivery", "commit", "alert"])
 
 
 if __name__ == "__main__":
