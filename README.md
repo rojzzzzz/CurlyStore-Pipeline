@@ -2,6 +2,7 @@
 
 In this project, I built an event-driven pipeline using Kafka for a fictional store of products for curly hair.
 
+[![CI](https://github.com/rojzzzzz/CurlyStore-Pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/rojzzzzz/CurlyStore-Pipeline/actions/workflows/ci.yml)
 
 ## How the pipeline works
 
