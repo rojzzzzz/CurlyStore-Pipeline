@@ -2,6 +2,7 @@ import copy
 from decimal import Decimal
 import json
 import random
+import re
 from pathlib import Path
 import runpy
 import sys
@@ -264,14 +265,14 @@ class PipelineTests(unittest.TestCase):
         consumer.__iter__.return_value = iter(self.record(e, i) for i, e in enumerate(events))
         with patch("kafka.KafkaConsumer", return_value=consumer):
             upload()
-        inserts = [c.args for c in cursor.execute.call_args_list if c.args[0].startswith("INSERT")]
-        self.assertEqual(len(inserts), 4)
+        inserts = [c.args for c in cursor.execute.call_args_list if "INSERT INTO" in c.args[0]]
+        self.assertEqual(len(inserts), 2)
         self.assertEqual([params["event_id"] for _, params in inserts],
-                         [self.order["event_id"]] * 2 + [self.refund["event_id"]] * 2)
-        self.assertEqual(inserts[0][1]["occurred_at"], self.order["order_date"])
-        self.assertEqual(inserts[2][1]["occurred_at"], self.refund["refunded_at"])
-        self.assertEqual(inserts[1][1]["total_price"], self.order["total_price"])
-        self.assertEqual([sql.split()[2] for sql, _ in inserts],
+                         [self.order["event_id"], self.refund["event_id"]])
+        self.assertEqual(inserts[0][1]["order_date"], self.order["order_date"])
+        self.assertEqual(inserts[1][1]["refunded_at"], self.refund["refunded_at"])
+        self.assertEqual(inserts[0][1]["total_price"], self.order["total_price"])
+        self.assertEqual([table for sql, _ in inserts for table in re.findall(r"INSERT\s+INTO\s+(\S+)", sql)],
                          ["[curly_store].[processed_events]", "[curly_store].orders",
                           "[curly_store].[processed_events]", "[curly_store].refunds"])
         self.assertEqual(consumer.commit.call_count, 3)
@@ -281,8 +282,11 @@ class PipelineTests(unittest.TestCase):
     def test_upload_does_not_acknowledge_failed_transaction(self):
         for event in (self.order, self.refund):
             upload, driver, cursor = self.uploader()
-            cursor.fetchone.return_value = None
-            cursor.execute.side_effect = [None, None, driver.OperationalError("insert failed")]
+            cursor.fetchone.side_effect = [None, (Decimal("10"),), (Decimal("0"),)]
+            def execute(sql, params):
+                if "INSERT INTO" in sql:
+                    raise driver.OperationalError("insert failed")
+            cursor.execute.side_effect = execute
             consumer = MagicMock()
             consumer.__iter__.return_value = iter([self.record(event)])
             with patch("kafka.KafkaConsumer", return_value=consumer):
@@ -301,10 +305,10 @@ class PipelineTests(unittest.TestCase):
             event = {**self.refund, "refund_amount": amount}
             if status is None:
                 with self.assertRaises(ValueError):
-                    insert(cursor, event)
+                    insert(cursor, event, event["refunded_at"])
                 self.assertEqual(cursor.execute.call_count, 2)
             else:
-                insert(cursor, event)
+                insert(cursor, event, event["refunded_at"])
                 self.assertEqual(cursor.execute.call_args.args[1]["status"], status)
                 self.assertEqual(cursor.execute.call_args_list[2].args[1]["event_id"], event["event_id"])
 
