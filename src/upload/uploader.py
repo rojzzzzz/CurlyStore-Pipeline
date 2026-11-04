@@ -28,35 +28,32 @@ def _check_event_existance(cursor, event_id: str) -> bool:
 
     return cursor.fetchone()
 
-def _insert_event(cursor, event_id: str, event_type: str, occurred_at: str | datetime.datetime):
-    """Inserts the new event into the processed_events table"""
 
-    query = f"""INSERT INTO {SQL_SCHEMA}.{SQL_EVENTS_TABLE} (event_id, event_type, occurred_at)
-               VALUES (%(event_id)s, %(event_type)s, %(occurred_at)s)"""
 
-    cursor.execute(query, {
-        "event_id": event_id,
-        "event_type": event_type,
-        "occurred_at": occurred_at
-    })
-    logger.info(f"Inserted event_id {event_id} into processed_events table.")
-
-def _insert_order(cursor, message: dict):
+def _insert_order(cursor, message: dict, occurred_at: str | datetime.datetime):
     """Inserts the new order into the orders table"""
 
-    query = f"""INSERT INTO {SQL_SCHEMA}.orders (order_id, event_id, store_id, product_id, quantity,
-               total_price, order_date, status) VALUES (%(order_id)s, %(event_id)s, %(store_id)s, %(product_id)s, %(quantity)s,
-               %(total_price)s, %(order_date)s, %(status)s)"""
+    query = f"""
+                BEGIN TRANSACTION;
+
+                INSERT INTO {SQL_SCHEMA}.{SQL_EVENTS_TABLE} (event_id, event_type, occurred_at)
+                VALUES (%(event_id)s, 'order', %(order_date)s);
+    
+                INSERT INTO {SQL_SCHEMA}.orders (order_id, event_id, store_id, product_id, quantity,
+                total_price, order_date, status) VALUES (%(order_id)s, %(event_id)s, %(store_id)s, %(product_id)s, %(quantity)s,
+                %(total_price)s, %(order_date)s, %(status)s);
+                
+                COMMIT TRANSACTION;"""
 
     try:
         cursor.execute(query, {
-            "order_id": message.get("order_id"),
             "event_id": message.get("event_id"),
+            "order_date": occurred_at,
+            "order_id": message.get("order_id"),
             "store_id": message.get("store_id"),
             "product_id": message.get("product_id"),
             "quantity": message.get("quantity"),
             "total_price": message.get("total_price"),
-            "order_date": message.get("order_date"),
             "status": message.get("status")
         })
         logger.info(f"Inserted order_id {message.get('order_id')} into orders table.")
@@ -64,7 +61,7 @@ def _insert_order(cursor, message: dict):
         logger.error(f"Operational error while inserting order: {e}")
         raise
 
-def _insert_refund(cursor, message: dict):
+def _insert_refund(cursor, message: dict, occurred_at: str | datetime.datetime):
     """ Inserts the new refund into the refunds table"""
 
     cursor.execute(f"""SELECT total_price FROM {SQL_SCHEMA}.orders WITH (UPDLOCK, HOLDLOCK)
@@ -82,17 +79,24 @@ def _insert_refund(cursor, message: dict):
     if not amount.is_finite() or amount <= 0 or amount + refunded > order[0]:
         raise RefundRejected("Refund amount must be positive and cannot exceed the remaining order total.")
 
-    query = f"""INSERT INTO {SQL_SCHEMA}.refunds (refund_id, event_id, order_id, refund_amount, refunded_at,
+    query = f"""
+            BEGIN TRANSACTION;
+            INSERT INTO {SQL_SCHEMA}.{SQL_EVENTS_TABLE} (event_id, event_type, occurred_at)
+            VALUES (%(event_id)s, 'refund', %(refunded_at)s);
+
+            INSERT INTO {SQL_SCHEMA}.refunds (refund_id, event_id, order_id, refund_amount, refunded_at,
             reason) VALUES (%(refund_id)s, %(event_id)s, %(order_id)s, %(refund_amount)s, %(refunded_at)s,
-            %(reason)s)"""
+            %(reason)s);
+            
+            COMMIT TRANSACTION;"""
 
     try:
         cursor.execute(query, {
-            "refund_id": message.get("refund_id"),
             "event_id": message.get("event_id"),
+            "refunded_at": occurred_at,
+            "refund_id": message.get("refund_id"),
             "order_id": message.get("order_id"),
             "refund_amount": message.get("refund_amount"),
-            "refunded_at": message.get("refunded_at"),
             "reason": message.get("reason")
         })
         cursor.execute(f"""UPDATE {SQL_SCHEMA}.orders SET status = %(status)s
@@ -134,11 +138,10 @@ def upload_event():
                     with conn.cursor() as cursor:
                         if not _check_event_existance(cursor, event_id):
                             occurred_at = payload["order_date" if event_type == "order" else "refunded_at"]
-                            _insert_event(cursor, event_id, event_type, occurred_at)
                             if event_type == "order":
-                                _insert_order(cursor, payload)
+                                _insert_order(cursor, payload, occurred_at)
                             else:
-                                _insert_refund(cursor, payload)
+                                _insert_refund(cursor, payload, occurred_at)
                         else:
                             logger.warning(f"Event with event_id {event_id} already exists in the processed_events table. Skipping insertion.")
 
