@@ -37,3 +37,16 @@ jobs:
 
       - name: Build project
         run: docker build -t curly-store:ci .
+
+      - name: Load SQL driver in container
+        run: |
+          docker run --rm -i curly-store:ci python - <<'PY'
+          import ctypes
+          from importlib.metadata import distribution
+
+          dist = distribution("mssql-python-odbc")
+          driver = next(path for path in dist.files
+                        if path.name.startswith("libmsodbcsql") and ".so." in path.name)
+          ctypes.CDLL(str(dist.locate_file(driver)))
+          print("SQL driver loaded")
+          PY

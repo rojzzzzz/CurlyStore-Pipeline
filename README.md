@@ -38,26 +38,23 @@ When a message is received in the DLQ (for example, because of schema drift), th
 
 ## Cost
 
-For **1 million incoming requests**, assuming 85% orders and drift in 7% of
-orders:
+Measured on **1,000 generated events**, with recovery caching enabled:
 
-| Expected events | Count |
+| Observed events | Count |
 | --- | ---: |
-| Orders / refunds | 850,000 / 150,000 |
-| Clean orders | 790,500 |
-| Drifted orders sent to DLQ | 59,500 |
-| Repairable drift (70%) | 41,650 |
-| Missing-field drift sent to parking lot (30%) | 17,850 |
+| Orders / refunds | 861 / 139 |
+| Clean events | 936 |
+| Events with schema drift | 64 |
+| Recovered events | 43 |
+| Unrecoverable missing-field events | 21 |
 
-At 400–1,000 input tokens per review, the estimated AI cost is **$1.00–$2.50**
-($1.75 at 700 tokens). This assumes one uncached review per drifted event, using
-[Jev's price](https://docs.typesafe.ai/models) of $0.042 per million input tokens
-and free output tokens. Repairable drift does not guarantee a successful repair.
+Uncached reviews used **675–694 input tokens** each. With **4 API calls** and
+**60 cache hits**, total usage was **2,738 input tokens**, equivalent to
+**$0.000115** at [Jev's price](https://docs.typesafe.ai/models) of $0.042 per
+million input tokens, with free output tokens.
 
-The total also includes Kafka and application hosting, [Azure SQL](https://azure.microsoft.com/en-us/pricing/details/azure-sql-database/single/),
-email alerts, networking, and backups. Actual costs depend on deployment and
-usage: the [generator](src/producer/event_generator.py) also applies drift to
-refunds, and retries or failed repairs can change the number of reviews and alerts.
+Kafka and application hosting, [Azure SQL](https://azure.microsoft.com/en-us/pricing/details/azure-sql-database/single/),
+email alerts, networking, and backups are additional costs.
 
 ## How to run
 
@@ -84,6 +81,9 @@ refunds, and retries or failed repairs can change the number of reviews and aler
    `docker compose logs -f`. The producer requests an event every five seconds;
    check the database tables for uploaded events. Stop the pipeline with
    `docker compose down`. Kafka data remains in its Docker volume.
+
+If another local Kafka broker uses port 9092, set `KAFKA_PORT=19092` in `.env`
+before starting.
 
 To run the unit tests locally, install Python 3.10 or newer, install the
 requirements with `python -m pip install -r requirements.txt`, and run

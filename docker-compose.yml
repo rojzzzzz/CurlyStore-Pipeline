@@ -13,7 +13,6 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.9.10
     hostname: kafka
-    container_name: kafka-broker
 
     ports:
       - "${KAFKA_BIND_ADDRESS:-127.0.0.1}:${KAFKA_PORT:-9092}:9092"
